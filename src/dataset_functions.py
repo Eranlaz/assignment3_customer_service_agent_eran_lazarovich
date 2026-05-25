@@ -173,9 +173,6 @@ def search_records(
     if n > 20:
         raise ValueError("n must not be greater than 20")
 
-    if offset < 0:
-        raise ValueError("offset must not be negative")
-
     df = load_dataset()
     normalized_query = _normalize_text(query)
 

@@ -276,6 +276,53 @@ def _new_tool_call(name: str, args: dict[str, Any]) -> AIMessage:
     )
 
 
+
+def _manual_conversation_memory_response_if_needed(state: AgentState) -> AIMessage | None:
+    """
+    Deterministically answer simple conversation-memory questions.
+
+    This is used for Task 2 episodic memory checks, such as:
+    "What did I ask before?"
+    """
+    query = _last_human_message(state["messages"]).content
+    normalized_query = query.lower()
+
+    memory_phrases = [
+        "what did i ask before",
+        "what did i ask",
+        "what was my previous question",
+        "previous question",
+        "what did we discuss",
+        "what have we discussed",
+        "earlier",
+        "last question",
+    ]
+
+    if not any(phrase in normalized_query for phrase in memory_phrases):
+        return None
+
+    human_messages = [
+        message.content
+        for message in state["messages"]
+        if isinstance(message, HumanMessage)
+    ]
+
+    # Exclude the current memory question itself.
+    previous_questions = human_messages[:-1]
+
+    if not previous_questions:
+        return AIMessage(
+            content="I do not have earlier user questions stored in this session yet."
+        )
+
+    recent_questions = previous_questions[-5:]
+
+    lines = ["Earlier in this session, you asked:"]
+    for index, question in enumerate(recent_questions, start=1):
+        lines.append(f"{index}. {question}")
+
+    return AIMessage(content="\n".join(lines))
+
 def _manual_multistep_response_if_needed(state: AgentState) -> AIMessage | None:
     """
     Deterministically handle common multi-step analytical queries one tool call at a time.
@@ -701,6 +748,13 @@ def agent_node(state: AgentState) -> dict[str, object]:
     """
     iterations = state.get("iterations", 0) + 1
 
+    memory_response = _manual_conversation_memory_response_if_needed(state)
+    if memory_response is not None:
+        return {
+            "messages": [memory_response],
+            "iterations": iterations,
+        }
+
     manual_response = _manual_multistep_response_if_needed(state)
     if manual_response is not None:
         return {
@@ -773,7 +827,7 @@ def route_after_agent(state: AgentState) -> Literal["tools", "fallback", "end"]:
     return "end"
 
 
-def build_graph():
+def build_graph(checkpointer=None):
     """
     Build and compile the LangGraph ReAct-style customer service data analyst agent.
     """
@@ -810,4 +864,4 @@ def build_graph():
     graph.add_edge("decline", END)
     graph.add_edge("fallback", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)

@@ -62,6 +62,29 @@ UNSTRUCTURED_KEYWORDS = {
     "responses to",
 }
 
+MEMORY_OR_FOLLOWUP_KEYWORDS = {
+    "what did i ask before",
+    "what did i ask",
+    "what was my previous question",
+    "previous question",
+    "what did we discuss",
+    "what have we discussed",
+    "what did you answer",
+    "earlier",
+    "before",
+    "last question",
+    "last answer",
+    "show me more",
+    "show me 3 more",
+    "show me five more",
+    "more examples",
+    "3 more",
+    "five more",
+    "what about",
+    "last two",
+    "total count of the last two",
+}
+
 OUT_OF_SCOPE_KEYWORDS = {
     "president",
     "champions league",
@@ -151,7 +174,7 @@ def route_query(query: str) -> RouteDecision:
     Classify a user query as structured, unstructured, or out_of_scope.
 
     Structured queries ask for concrete data operations such as counts, categories,
-    examples, or distributions.
+    examples, distributions, or session follow-up questions.
 
     Unstructured queries ask for summaries or qualitative analysis based on the dataset.
 
@@ -168,32 +191,34 @@ def route_query(query: str) -> RouteDecision:
 
     has_structured_signal = _contains_any(normalized_query, STRUCTURED_KEYWORDS)
     has_unstructured_signal = _contains_any(normalized_query, UNSTRUCTURED_KEYWORDS)
+    has_memory_or_followup_signal = _contains_any(normalized_query, MEMORY_OR_FOLLOWUP_KEYWORDS)
     has_out_of_scope_signal = _contains_any(normalized_query, OUT_OF_SCOPE_KEYWORDS)
     has_dataset_signal = _contains_any(normalized_query, _dataset_terms())
 
-    # Strong external/creative/general-knowledge signals should be declined.
-    # Example: "Who is the president of France?" or "Write me a poem".
     if has_out_of_scope_signal:
         return RouteDecision(
             query_type=QueryType.OUT_OF_SCOPE,
             reason="The query appears to ask for general knowledge, creative writing, or external recommendations rather than analysis of the dataset.",
         )
 
-    # Summary and qualitative-response questions over dataset concepts.
+    if has_memory_or_followup_signal:
+        return RouteDecision(
+            query_type=QueryType.STRUCTURED,
+            reason="The query refers to the current conversation or asks a follow-up question that should use session memory.",
+        )
+
     if has_unstructured_signal and has_dataset_signal:
         return RouteDecision(
             query_type=QueryType.UNSTRUCTURED,
             reason="The query asks for a summary or qualitative analysis based on customer service data.",
         )
 
-    # Counts, lists, examples, categories, intents, and distributions.
     if has_structured_signal and has_dataset_signal:
         return RouteDecision(
             query_type=QueryType.STRUCTURED,
             reason="The query asks for a concrete data operation such as a count, list, example, or distribution.",
         )
 
-    # Some valid dataset questions may be short, for example: "refund requests".
     if has_dataset_signal and not has_unstructured_signal:
         return RouteDecision(
             query_type=QueryType.STRUCTURED,

@@ -83,6 +83,7 @@ def get_examples(
     category: str | None = None,
     intent: str | None = None,
     n: int = 3,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     """
     Return example customer-service records.
@@ -98,11 +99,14 @@ def get_examples(
     if n > 20:
         raise ValueError("n must not be greater than 20")
 
+    if offset < 0:
+        raise ValueError("offset must not be negative")
+
     df = load_dataset()
     filtered = _filter_dataset(df, category=category, intent=intent)
 
     examples = []
-    for _, row in filtered.head(n).iterrows():
+    for _, row in filtered.iloc[offset : offset + n].iterrows():
         examples.append(
             {
                 "instruction": row[CUSTOMER_QUERY_COLUMN],
@@ -168,6 +172,9 @@ def search_records(
 
     if n > 20:
         raise ValueError("n must not be greater than 20")
+
+    if offset < 0:
+        raise ValueError("offset must not be negative")
 
     df = load_dataset()
     normalized_query = _normalize_text(query)

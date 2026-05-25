@@ -112,6 +112,11 @@ class ShowExamplesInput(BaseModel):
         le=20,
         description="Number of examples to return. Must be between 1 and 20.",
     )
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Number of matching examples to skip before returning results. Use this for follow-up requests like 'show me 3 more'.",
+    )
 
 
 class IntentDistributionInput(BaseModel):
@@ -180,6 +185,7 @@ def show_examples_tool(
     category: str | None = None,
     intent: str | None = None,
     n: int = 3,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """
     Return examples from the dataset filtered by category and/or intent.
@@ -188,11 +194,24 @@ def show_examples_tool(
     clean_intent = _clean_optional_text(intent)
     clean_n = _clean_n(n)
 
+    try:
+        clean_offset = int(offset)
+    except (TypeError, ValueError):
+        clean_offset = 0
+
+    clean_offset = max(0, clean_offset)
+
     return {
         "category": clean_category,
         "intent": clean_intent,
         "n": clean_n,
-        "examples": get_examples(category=clean_category, intent=clean_intent, n=clean_n),
+        "offset": clean_offset,
+        "examples": get_examples(
+            category=clean_category,
+            intent=clean_intent,
+            n=clean_n,
+            offset=clean_offset,
+        ),
     }
 
 

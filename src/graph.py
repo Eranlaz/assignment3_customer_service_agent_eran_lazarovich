@@ -1,5 +1,6 @@
 import ast
 import json
+import re
 import uuid
 from typing import Annotated, Any, Literal, TypedDict
 
@@ -323,6 +324,163 @@ def _manual_conversation_memory_response_if_needed(state: AgentState) -> AIMessa
 
     return AIMessage(content="\n".join(lines))
 
+
+def _current_turn_messages_for_state(state: AgentState) -> list[BaseMessage]:
+    """
+    Return messages belonging to the current user turn.
+    """
+    messages = state["messages"]
+
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], HumanMessage):
+            return messages[index:]
+
+    return messages
+
+
+def _requested_more_count(query: str, default_n: int) -> int:
+    """
+    Extract how many additional examples the user requested.
+    """
+    match = re.search(r"\b(\d+)\b", query)
+    if match:
+        return max(1, min(int(match.group(1)), 20))
+
+    word_to_number = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+    }
+
+    normalized_query = query.lower()
+
+    for word, number in word_to_number.items():
+        if re.search(rf"\b{word}\b", normalized_query):
+            return number
+
+    return max(1, min(default_n, 20))
+
+
+def _last_show_examples_args_before_current_turn(state: AgentState) -> dict[str, Any] | None:
+    """
+    Return the most recent show_examples arguments before the current user turn.
+    """
+    messages = state["messages"]
+    current_turn_start = len(messages)
+
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], HumanMessage):
+            current_turn_start = index
+            break
+
+    previous_messages = messages[:current_turn_start]
+
+    for message in reversed(previous_messages):
+        if not isinstance(message, AIMessage) or not message.tool_calls:
+            continue
+
+        for tool_call in reversed(message.tool_calls):
+            if tool_call.get("name") == "show_examples":
+                args = tool_call.get("args") or {}
+                if isinstance(args, dict):
+                    return _normalize_tool_arg(args)
+
+    return None
+
+
+def _current_turn_has_show_examples_observation(state: AgentState) -> bool:
+    """
+    Return True if show_examples was already called in the current turn and returned an observation.
+    """
+    current_turn_messages = _current_turn_messages_for_state(state)
+
+    has_show_examples_call = False
+    has_tool_observation = False
+
+    for message in current_turn_messages:
+        if isinstance(message, AIMessage) and message.tool_calls:
+            for tool_call in message.tool_calls:
+                if tool_call.get("name") == "show_examples":
+                    has_show_examples_call = True
+
+        if isinstance(message, ToolMessage):
+            has_tool_observation = True
+
+    return has_show_examples_call and has_tool_observation
+
+
+def _manual_more_examples_response_if_needed(state: AgentState) -> AIMessage | None:
+    """
+    Handle follow-up requests like:
+    - "Show me 3 more"
+    - "Show me more examples"
+    - "3 more"
+
+    The function reuses the previous show_examples filters and advances the offset.
+    """
+    query = _last_human_message(state["messages"]).content
+    normalized_query = query.lower().strip()
+
+    asks_for_more_examples = (
+        "more" in normalized_query
+        and (
+            "example" in normalized_query
+            or "examples" in normalized_query
+            or "show" in normalized_query
+            or re.search(r"\b\d+\s+more\b", normalized_query)
+        )
+    )
+
+    if not asks_for_more_examples:
+        return None
+
+    # If this turn already called show_examples, produce the final answer from the new observation.
+    if _current_turn_has_show_examples_observation(state):
+        return _generate_final_answer_from_observations(state)
+
+    previous_args = _last_show_examples_args_before_current_turn(state)
+
+    if not previous_args:
+        return AIMessage(
+            content=(
+                "I do not have a previous examples request in this session. "
+                "Ask for examples from a category or intent first, such as "
+                "'Show me 3 examples from the REFUND category.'"
+            )
+        )
+
+    previous_n = int(previous_args.get("n") or 3)
+    previous_offset = int(previous_args.get("offset") or 0)
+
+    new_n = _requested_more_count(query, default_n=previous_n)
+    new_offset = previous_offset + previous_n
+
+    args: dict[str, Any] = {
+        "n": new_n,
+        "offset": new_offset,
+    }
+
+    category = previous_args.get("category")
+    intent = previous_args.get("intent")
+
+    if category:
+        args["category"] = category
+
+    if intent:
+        args["intent"] = intent
+
+    return _new_tool_call(
+        name="show_examples",
+        args=args,
+    )
+
 def _manual_multistep_response_if_needed(state: AgentState) -> AIMessage | None:
     """
     Deterministically handle common multi-step analytical queries one tool call at a time.
@@ -467,7 +625,12 @@ def _generate_final_answer_from_observations(state: AgentState) -> AIMessage:
     observations: list[dict[str, Any]] = []
     raw_observations: list[str] = []
 
-    for message in state["messages"]:
+    messages_for_observations = _current_turn_messages_for_state(state)
+
+    if not any(isinstance(message, ToolMessage) for message in messages_for_observations):
+        messages_for_observations = state["messages"]
+
+    for message in messages_for_observations:
         if isinstance(message, ToolMessage):
             raw_content = str(message.content)
             raw_observations.append(raw_content[:4000])
@@ -752,6 +915,13 @@ def agent_node(state: AgentState) -> dict[str, object]:
     if memory_response is not None:
         return {
             "messages": [memory_response],
+            "iterations": iterations,
+        }
+
+    more_examples_response = _manual_more_examples_response_if_needed(state)
+    if more_examples_response is not None:
+        return {
+            "messages": [more_examples_response],
             "iterations": iterations,
         }
 

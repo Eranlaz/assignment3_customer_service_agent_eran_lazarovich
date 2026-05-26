@@ -481,6 +481,169 @@ def _manual_more_examples_response_if_needed(state: AgentState) -> AIMessage | N
         args=args,
     )
 
+
+def _count_args_from_query(query: str) -> dict[str, Any] | None:
+    """
+    Map common natural-language count questions to count_records arguments.
+    """
+    normalized_query = query.lower()
+
+    if "complaint" in normalized_query or "complaints" in normalized_query:
+        return {"intent": "complaint"}
+
+    if "refund" in normalized_query or "refunds" in normalized_query or "money back" in normalized_query:
+        return {"category": "REFUND"}
+
+    if "account" in normalized_query or "accounts" in normalized_query:
+        return {"category": "ACCOUNT"}
+
+    if "shipping" in normalized_query:
+        return {"category": "SHIPPING"}
+
+    if "order" in normalized_query or "orders" in normalized_query:
+        return {"category": "ORDER"}
+
+    if "feedback" in normalized_query:
+        return {"category": "FEEDBACK"}
+
+    return None
+
+
+def _count_label_from_observation(observation: dict[str, Any]) -> str:
+    """
+    Create a readable label for a count_records observation.
+    """
+    category = observation.get("category")
+    intent = observation.get("intent")
+
+    if category and intent:
+        return f"{category} / {intent}"
+
+    if category:
+        return str(category)
+
+    if intent:
+        return str(intent)
+
+    return "matching records"
+
+
+def _count_observations_before_current_turn(state: AgentState) -> list[dict[str, Any]]:
+    """
+    Return count_records observations from previous turns only.
+    """
+    messages = state["messages"]
+    current_turn_start = len(messages)
+
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], HumanMessage):
+            current_turn_start = index
+            break
+
+    previous_messages = messages[:current_turn_start]
+    observations: list[dict[str, Any]] = []
+
+    for message in previous_messages:
+        if not isinstance(message, ToolMessage):
+            continue
+
+        parsed = _parse_json_like_text(str(message.content))
+
+        if not isinstance(parsed, dict):
+            continue
+
+        if isinstance(parsed.get("count"), int):
+            observations.append(parsed)
+
+    return observations
+
+
+def _current_turn_has_count_observation(state: AgentState) -> bool:
+    """
+    Return True if the current turn already called count_records and got an observation.
+    """
+    current_turn_messages = _current_turn_messages_for_state(state)
+
+    has_count_call = False
+    has_count_observation = False
+
+    for message in current_turn_messages:
+        if isinstance(message, AIMessage) and message.tool_calls:
+            for tool_call in message.tool_calls:
+                if tool_call.get("name") == "count_records":
+                    has_count_call = True
+
+        if isinstance(message, ToolMessage):
+            parsed = _parse_json_like_text(str(message.content))
+            if isinstance(parsed, dict) and isinstance(parsed.get("count"), int):
+                has_count_observation = True
+
+    return has_count_call and has_count_observation
+
+
+def _manual_count_followup_response_if_needed(state: AgentState) -> AIMessage | None:
+    """
+    Handle count-related follow-ups:
+    - "How many complaints did we get?"
+    - "What about refunds?"
+    - "What is the total count of the last two?"
+    """
+    query = _last_human_message(state["messages"]).content
+    normalized_query = query.lower()
+
+    asks_for_last_two_total = (
+        "last two" in normalized_query
+        and ("total" in normalized_query or "combined" in normalized_query or "sum" in normalized_query)
+    )
+
+    if asks_for_last_two_total:
+        count_observations = _count_observations_before_current_turn(state)
+
+        if len(count_observations) < 2:
+            return AIMessage(
+                content=(
+                    "I do not have two previous count results in this session yet. "
+                    "Ask two count questions first, then ask for the total count of the last two."
+                )
+            )
+
+        last_two = count_observations[-2:]
+        labels = [_count_label_from_observation(observation) for observation in last_two]
+        counts = [int(observation["count"]) for observation in last_two]
+        total = sum(counts)
+
+        return AIMessage(
+            content=(
+                "The last two count results were:\n"
+                f"- {labels[0]}: {counts[0]}\n"
+                f"- {labels[1]}: {counts[1]}\n\n"
+                f"Total count: {counts[0]} + {counts[1]} = {total}."
+            )
+        )
+
+    asks_for_count = (
+        "how many" in normalized_query
+        or "count" in normalized_query
+        or "number of" in normalized_query
+        or normalized_query.startswith("what about")
+    )
+
+    if not asks_for_count:
+        return None
+
+    if _current_turn_has_count_observation(state):
+        return _generate_final_answer_from_observations(state)
+
+    args = _count_args_from_query(query)
+
+    if not args:
+        return None
+
+    return _new_tool_call(
+        name="count_records",
+        args=args,
+    )
+
 def _manual_multistep_response_if_needed(state: AgentState) -> AIMessage | None:
     """
     Deterministically handle common multi-step analytical queries one tool call at a time.
@@ -922,6 +1085,13 @@ def agent_node(state: AgentState) -> dict[str, object]:
     if more_examples_response is not None:
         return {
             "messages": [more_examples_response],
+            "iterations": iterations,
+        }
+
+    count_followup_response = _manual_count_followup_response_if_needed(state)
+    if count_followup_response is not None:
+        return {
+            "messages": [count_followup_response],
             "iterations": iterations,
         }
 

@@ -6,6 +6,12 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.errors import GraphRecursionError
 
 from src.graph import build_graph
+from src.profile_store import (
+    format_profile_summary,
+    is_profile_question,
+    is_profile_statement,
+    update_profile_from_message,
+)
 
 
 STORAGE_DIR = Path("storage")
@@ -82,6 +88,11 @@ def parse_args() -> argparse.Namespace:
         default="default",
         help="Session ID used to persist and resume conversation memory.",
     )
+    parser.add_argument(
+        "--user",
+        default=None,
+        help="User ID used to persist a separate distilled user profile. Defaults to the session ID.",
+    )
 
     return parser.parse_args()
 
@@ -92,6 +103,7 @@ def run_cli() -> None:
     """
     args = parse_args()
     session_id = args.session
+    user_id = args.user or session_id
 
     STORAGE_DIR.mkdir(exist_ok=True)
 
@@ -107,6 +119,7 @@ def run_cli() -> None:
 
         print("Customer Service Data Analyst Agent")
         print(f"Session: {session_id}")
+        print(f"User profile: {user_id}")
         print("Type 'exit' or 'quit' to stop.")
         print()
 
@@ -121,6 +134,32 @@ def run_cli() -> None:
                 break
 
             if not user_input:
+                continue
+
+            profile_updated = update_profile_from_message(user_id, user_input)
+
+            if is_profile_question(user_input):
+                print()
+                print("Route: profile")
+                print("Route reason: The query asks about the persistent user profile.")
+                print()
+                print("Reasoning trace:")
+                print("No tool calls were needed.")
+                print()
+                print("Agent:", format_profile_summary(user_id))
+                print()
+                continue
+
+            if profile_updated and is_profile_statement(user_input):
+                print()
+                print("Route: profile")
+                print("Route reason: The message contains user-profile information.")
+                print()
+                print("Reasoning trace:")
+                print("No tool calls were needed.")
+                print()
+                print("Agent: Got it. I updated your user profile.")
+                print()
                 continue
 
             try:
